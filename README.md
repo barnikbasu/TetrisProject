@@ -52,6 +52,8 @@ This project serves as a practical implementation of our CS syllabus:
 2. Compile: gcc main.c -o tetris
 3. Run: ./tetris
 
+---
+
 ## 📄 Project Features
 **Ghost Piece:** Predicts where the block will land using collision look-ahead.
 
