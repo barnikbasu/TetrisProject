@@ -1,13 +1,13 @@
 /*
  * ============================================================
- *  TETRIS  —  DSA Project, 2nd Semester CS
- *  Language : C99  |  Single file, no external libraries
+ *  TETRIS  —  DSA Project, CSC201 & CSC211
+ *  Language : C  |  Single file, no external libraries
  *  Compile  : gcc tetris.c -o tetris          (Linux/Mac)
  *             gcc tetris.c -o tetris.exe      (Windows/MinGW)
  *  Run      : ./tetris   or   tetris.exe
  * ============================================================
  *
- *  DSA CONCEPTS USED  (all taught up to trees)
+ *  DSA CONCEPTS USED
  *  --------------------------------------------
  *  1. Struct          -> Piece, Game, Queue, Stack, Node
  *  2. 2D Array        -> board[ROWS][COLS], shape table
