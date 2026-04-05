@@ -1,0 +1,523 @@
+/*
+ * ============================================================
+ *  TETRIS - DSA Project (2nd Semester)
+ *  Language : C
+ *  Team Size: 4
+ *
+ *  DSA Concepts Used:
+ *    - Queue  (circular array)  -> next pieces
+ *    - Linked List (singly)     -> leaderboard
+ *    - 2D Array                 -> board
+ *    - Structs                  -> Piece, Game, Node, Queue
+ * ============================================================
+ */
+
+#define _DEFAULT_SOURCE
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#ifdef _WIN32
+#include <conio.h>
+#include <windows.h>
+#define SLEEP_MS(ms) Sleep(ms)
+#define KB_HIT() _kbhit()
+#define GET_CH() _getch()
+#else
+#include <unistd.h>
+#include <termios.h>
+#include <fcntl.h>
+#define SLEEP_MS(ms) usleep((ms) * 1000)
+
+static int KB_HIT(void) {
+    struct termios oldt, newt;
+    int ch, oldf;
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= (tcflag_t)~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+    ch = getchar();
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    fcntl(STDIN_FILENO, F_SETFL, oldf);
+    if (ch != EOF) {
+        ungetc(ch, stdin);
+        return 1;
+    }
+    return 0;
+}
+
+static int GET_CH(void) {
+    struct termios oldt, newt;
+    int ch;
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= (tcflag_t)~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    ch = getchar();
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    return ch;
+}
+#endif
+
+#define ROWS 20
+#define COLS 10
+#define Q_CAP 5
+#define MAX_SCORES 10
+#define NAME_LEN 20
+#define SCORE_FILE "scores.txt"
+
+#define CLR_RESET   "\033[0m"
+#define CLR_CYAN    "\033[36m"
+#define CLR_YELLOW  "\033[33m"
+#define CLR_GREEN   "\033[32m"
+#define CLR_RED     "\033[31m"
+#define CLR_MAGENTA "\033[35m"
+#define CLR_BLUE    "\033[34m"
+#define CLR_WHITE   "\033[37m"
+
+typedef struct {
+    int shape[4][4];
+    int row, col;
+    int type;
+    int rot;
+} Piece;
+
+typedef struct {
+    int data[Q_CAP];
+    int front, rear, count;
+} Queue;
+
+typedef struct Node {
+    char name[NAME_LEN];
+    int score;
+    struct Node *next;
+} Node;
+
+typedef struct {
+    int board[ROWS][COLS];
+    Piece cur;
+    Queue nextQ;
+    Node *leaders;
+    int score;
+    int lines;
+    int holdType;
+    int holdUsed;
+    int gameOver;
+} Game;
+
+static const int SHAPES[7][4][4][4] = {
+    {{{0,0,0,0},{1,1,1,1},{0,0,0,0},{0,0,0,0}},{{0,0,1,0},{0,0,1,0},{0,0,1,0},{0,0,1,0}},{{0,0,0,0},{1,1,1,1},{0,0,0,0},{0,0,0,0}},{{0,0,1,0},{0,0,1,0},{0,0,1,0},{0,0,1,0}}},
+    {{{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}},{{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}},{{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}},{{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}}},
+    {{{0,1,0,0},{1,1,1,0},{0,0,0,0},{0,0,0,0}},{{0,1,0,0},{0,1,1,0},{0,1,0,0},{0,0,0,0}},{{0,0,0,0},{1,1,1,0},{0,1,0,0},{0,0,0,0}},{{0,1,0,0},{1,1,0,0},{0,1,0,0},{0,0,0,0}}},
+    {{{0,1,1,0},{1,1,0,0},{0,0,0,0},{0,0,0,0}},{{1,0,0,0},{1,1,0,0},{0,1,0,0},{0,0,0,0}},{{0,1,1,0},{1,1,0,0},{0,0,0,0},{0,0,0,0}},{{1,0,0,0},{1,1,0,0},{0,1,0,0},{0,0,0,0}}},
+    {{{1,1,0,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}},{{0,1,0,0},{1,1,0,0},{1,0,0,0},{0,0,0,0}},{{1,1,0,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}},{{0,1,0,0},{1,1,0,0},{1,0,0,0},{0,0,0,0}}},
+    {{{1,0,0,0},{1,1,1,0},{0,0,0,0},{0,0,0,0}},{{0,1,1,0},{0,1,0,0},{0,1,0,0},{0,0,0,0}},{{0,0,0,0},{1,1,1,0},{0,0,1,0},{0,0,0,0}},{{0,1,0,0},{0,1,0,0},{1,1,0,0},{0,0,0,0}}},
+    {{{0,0,1,0},{1,1,1,0},{0,0,0,0},{0,0,0,0}},{{0,1,0,0},{0,1,0,0},{0,1,1,0},{0,0,0,0}},{{0,0,0,0},{1,1,1,0},{1,0,0,0},{0,0,0,0}},{{1,1,0,0},{0,1,0,0},{0,1,0,0},{0,0,0,0}}}
+};
+
+static const char PIECE_CHAR[7] = {'I','O','T','S','Z','J','L'};
+
+static const char *pieceColor(int type) {
+    switch (type) {
+        case 0: return CLR_CYAN;
+        case 1: return CLR_YELLOW;
+        case 2: return CLR_MAGENTA;
+        case 3: return CLR_GREEN;
+        case 4: return CLR_RED;
+        case 5: return CLR_BLUE;
+        case 6: return CLR_WHITE;
+        default: return CLR_RESET;
+    }
+}
+
+static void clearScreen(void) {
+    printf("\033[H\033[J");
+}
+
+static void qInit(Queue *q) {
+    q->front = q->rear = q->count = 0;
+}
+
+static int qEmpty(const Queue *q) { return q->count == 0; }
+static int qFull(const Queue *q) { return q->count == Q_CAP; }
+
+static void qPush(Queue *q, int value) {
+    if (qFull(q)) return;
+    q->data[q->rear] = value;
+    q->rear = (q->rear + 1) % Q_CAP;
+    q->count++;
+}
+
+static int qPop(Queue *q) {
+    int value;
+    if (qEmpty(q)) return -1;
+    value = q->data[q->front];
+    q->front = (q->front + 1) % Q_CAP;
+    q->count--;
+    return value;
+}
+
+static Node *listInsert(Node *head, const char *name, int score) {
+    Node *newNode = (Node *)malloc(sizeof(Node));
+    Node *cur;
+    if (!newNode) return head;
+
+    strncpy(newNode->name, name, NAME_LEN - 1);
+    newNode->name[NAME_LEN - 1] = '\0';
+    newNode->score = score;
+    newNode->next = NULL;
+
+    if (head == NULL || score > head->score) {
+        newNode->next = head;
+        return newNode;
+    }
+
+    cur = head;
+    while (cur->next != NULL && cur->next->score >= score)
+        cur = cur->next;
+
+    newNode->next = cur->next;
+    cur->next = newNode;
+    return head;
+}
+
+static void listSave(Node *head) {
+    FILE *fp = fopen(SCORE_FILE, "w");
+    int count = 0;
+    if (!fp) return;
+
+    while (head != NULL && count < MAX_SCORES) {
+        fprintf(fp, "%s %d\n", head->name, head->score);
+        head = head->next;
+        count++;
+    }
+    fclose(fp);
+}
+
+static Node *listLoad(void) {
+    FILE *fp = fopen(SCORE_FILE, "r");
+    Node *head = NULL;
+    char name[NAME_LEN];
+    int score;
+    if (!fp) return NULL;
+
+    while (fscanf(fp, "%19s %d", name, &score) == 2)
+        head = listInsert(head, name, score);
+
+    fclose(fp);
+    return head;
+}
+
+static void listPrint(Node *head) {
+    int rank = 1;
+    printf("\n%s=========== LEADERBOARD ===========%s\n", CLR_YELLOW, CLR_RESET);
+    while (head != NULL && rank <= MAX_SCORES) {
+        printf("%2d. %-19s %5d\n", rank, head->name, head->score);
+        head = head->next;
+        rank++;
+    }
+}
+
+static void listFree(Node *head) {
+    while (head != NULL) {
+        Node *temp = head;
+        head = head->next;
+        free(temp);
+    }
+}
+
+static void shapeLoad(Piece *p) {
+    int r, c;
+    for (r = 0; r < 4; r++)
+        for (c = 0; c < 4; c++)
+            p->shape[r][c] = SHAPES[p->type][p->rot][r][c];
+}
+
+static int fits(Game *g, Piece *p, int dr, int dc, int newRot) {
+    int r, c;
+    for (r = 0; r < 4; r++) {
+        for (c = 0; c < 4; c++) {
+            int br, bc;
+            if (!SHAPES[p->type][newRot][r][c]) continue;
+            br = p->row + r + dr;
+            bc = p->col + c + dc;
+            if (bc < 0 || bc >= COLS) return 0;
+            if (br >= ROWS) return 0;
+            if (br < 0) continue;
+            if (g->board[br][bc]) return 0;
+        }
+    }
+    return 1;
+}
+
+static void fillQueue(Game *g) {
+    while (g->nextQ.count < Q_CAP)
+        qPush(&g->nextQ, rand() % 7);
+}
+
+static void spawnPiece(Game *g) {
+    int type;
+    fillQueue(g);
+    type = qPop(&g->nextQ);
+    qPush(&g->nextQ, rand() % 7);
+
+    g->cur.type = type;
+    g->cur.rot = 0;
+    g->cur.row = 0;
+    g->cur.col = COLS / 2 - 2;
+    shapeLoad(&g->cur);
+    g->holdUsed = 0;
+
+    if (!fits(g, &g->cur, 0, 0, g->cur.rot))
+        g->gameOver = 1;
+}
+
+static void holdPiece(Game *g) {
+    int currentType;
+    if (g->holdUsed) return;
+
+    g->holdUsed = 1;
+    currentType = g->cur.type;
+
+    if (g->holdType == -1) {
+        g->holdType = currentType;
+        spawnPiece(g);
+        g->holdUsed = 1;
+    } else {
+        int prev = g->holdType;
+        g->holdType = currentType;
+        g->cur.type = prev;
+        g->cur.rot = 0;
+        g->cur.row = 0;
+        g->cur.col = COLS / 2 - 2;
+        shapeLoad(&g->cur);
+
+        if (!fits(g, &g->cur, 0, 0, g->cur.rot))
+            g->gameOver = 1;
+    }
+}
+
+static void lockAndClear(Game *g) {
+    int r, c, cleared = 0;
+
+    for (r = 0; r < 4; r++) {
+        for (c = 0; c < 4; c++) {
+            if (g->cur.shape[r][c]) {
+                int br = g->cur.row + r;
+                int bc = g->cur.col + c;
+                if (br >= 0 && br < ROWS && bc >= 0 && bc < COLS)
+                    g->board[br][bc] = g->cur.type + 1;
+            }
+        }
+    }
+
+    for (r = ROWS - 1; r >= 0; r--) {
+        int full = 1;
+        for (c = 0; c < COLS; c++) {
+            if (!g->board[r][c]) {
+                full = 0;
+                break;
+            }
+        }
+        if (full) {
+            int i;
+            cleared++;
+            for (i = r; i > 0; i--)
+                memcpy(g->board[i], g->board[i - 1], sizeof(g->board[i]));
+            memset(g->board[0], 0, sizeof(g->board[0]));
+            r++;
+        }
+    }
+
+    g->score += 100 * cleared;
+    g->lines += cleared;
+}
+
+static void drawNextQueue(const Queue *q) {
+    int i, idx;
+    printf("%sNext Pieces:%s ", CLR_CYAN, CLR_RESET);
+    for (i = 0; i < q->count; i++) {
+        idx = (q->front + i) % Q_CAP;
+        printf("[%c] ", PIECE_CHAR[q->data[idx]]);
+    }
+    printf("\n");
+}
+
+static void draw(Game *g) {
+    int temp[ROWS][COLS];
+    int r, c;
+
+    clearScreen();
+
+    for (r = 0; r < ROWS; r++)
+        for (c = 0; c < COLS; c++)
+            temp[r][c] = g->board[r][c];
+
+    for (r = 0; r < 4; r++) {
+        for (c = 0; c < 4; c++) {
+            if (g->cur.shape[r][c]) {
+                int br = g->cur.row + r;
+                int bc = g->cur.col + c;
+                if (br >= 0 && br < ROWS && bc >= 0 && bc < COLS)
+                    temp[br][bc] = g->cur.type + 1;
+            }
+        }
+    }
+
+    printf("%s======================================%s\n", CLR_YELLOW, CLR_RESET);
+    printf("%s         TETRIS - DSA PROJECT         %s\n", CLR_YELLOW, CLR_RESET);
+    printf("%s======================================%s\n\n", CLR_YELLOW, CLR_RESET);
+
+    printf("%sScore:%s %-6d   %sLines:%s %-6d   %sHold:%s ",
+           CLR_GREEN, CLR_RESET, g->score,
+           CLR_GREEN, CLR_RESET, g->lines,
+           CLR_GREEN, CLR_RESET);
+
+    if (g->holdType == -1) printf("Empty\n");
+    else printf("%c\n", PIECE_CHAR[g->holdType]);
+
+    drawNextQueue(&g->nextQ);
+    printf("\n");
+
+    printf("+--------------------+\n");
+    for (r = 0; r < ROWS; r++) {
+        printf("|");
+        for (c = 0; c < COLS; c++) {
+            if (temp[r][c] == 0) {
+                printf("  ");
+            } else {
+                int t = temp[r][c] - 1;
+                printf("%s[]%s", pieceColor(t), CLR_RESET);
+            }
+        }
+        printf("|\n");
+    }
+    printf("+--------------------+\n");
+
+    printf("\n%sControls:%s A-Left  D-Right  S-Down  W-Rotate  Space-Drop  C-Hold  Q-Quit\n",
+           CLR_CYAN, CLR_RESET);
+}
+
+static void handleInput(Game *g) {
+    int ch, newRot;
+    if (!KB_HIT()) return;
+    ch = GET_CH();
+
+    switch (ch) {
+        case 'a': case 'A':
+            if (fits(g, &g->cur, 0, -1, g->cur.rot)) g->cur.col--;
+            break;
+        case 'd': case 'D':
+            if (fits(g, &g->cur, 0, 1, g->cur.rot)) g->cur.col++;
+            break;
+        case 's': case 'S':
+            if (fits(g, &g->cur, 1, 0, g->cur.rot)) g->cur.row++;
+            break;
+        case 'w': case 'W':
+            newRot = (g->cur.rot + 1) % 4;
+            if (fits(g, &g->cur, 0, 0, newRot)) {
+                g->cur.rot = newRot;
+                shapeLoad(&g->cur);
+            }
+            break;
+        case ' ':
+            while (fits(g, &g->cur, 1, 0, g->cur.rot))
+                g->cur.row++;
+            lockAndClear(g);
+            spawnPiece(g);
+            break;
+        case 'c': case 'C':
+            holdPiece(g);
+            break;
+        case 'q': case 'Q':
+            g->gameOver = 1;
+            break;
+        default:
+            break;
+    }
+}
+
+static void tick(Game *g) {
+    if (fits(g, &g->cur, 1, 0, g->cur.rot))
+        g->cur.row++;
+    else {
+        lockAndClear(g);
+        spawnPiece(g);
+    }
+}
+
+static void showTitleScreen(void) {
+    clearScreen();
+    printf("%s============================================%s\n", CLR_YELLOW, CLR_RESET);
+    printf("%s         TETRIS - DSA MINI PROJECT         %s\n", CLR_YELLOW, CLR_RESET);
+    printf("%s============================================%s\n\n", CLR_YELLOW, CLR_RESET);
+    printf("Built in C using:\n");
+    printf("- 2D Array for board\n");
+    printf("- Circular Queue for next pieces\n");
+    printf("- Linked List for leaderboard\n");
+    printf("- Structs for game data\n\n");
+    printf("%sControls:%s\n", CLR_CYAN, CLR_RESET);
+    printf("  A  -> Move Left\n");
+    printf("  D  -> Move Right\n");
+    printf("  S  -> Move Down\n");
+    printf("  W  -> Rotate\n");
+    printf("  Space -> Hard Drop\n");
+    printf("  C  -> Hold Piece\n");
+    printf("  Q  -> Quit Game\n\n");
+    printf("Press Enter to start...");
+    getchar();
+}
+
+static void gameInit(Game *g) {
+    memset(g->board, 0, sizeof(g->board));
+    qInit(&g->nextQ);
+
+    g->leaders = listLoad();
+    g->score = 0;
+    g->lines = 0;
+    g->holdType = -1;
+    g->holdUsed = 0;
+    g->gameOver = 0;
+
+    fillQueue(g);
+    spawnPiece(g);
+}
+
+int main(void) {
+    Game g;
+    char player[NAME_LEN];
+
+    srand((unsigned)time(NULL));
+
+    printf("Enter your name (one word, max 19 chars): ");
+    if (scanf("%19s", player) != 1)
+        strcpy(player, "Player");
+    getchar();
+
+    showTitleScreen();
+    gameInit(&g);
+
+    while (!g.gameOver) {
+        handleInput(&g);
+        tick(&g);
+        draw(&g);
+        SLEEP_MS(100);
+    }
+
+    clearScreen();
+    printf("%s=========== GAME OVER ===========%s\n", CLR_RED, CLR_RESET);
+    printf("Player       : %s\n", player);
+    printf("Final Score  : %d\n", g.score);
+    printf("Lines Cleared: %d\n", g.lines);
+
+    g.leaders = listInsert(g.leaders, player, g.score);
+    listSave(g.leaders);
+    listPrint(g.leaders);
+    listFree(g.leaders);
+
+    return 0;
+}
