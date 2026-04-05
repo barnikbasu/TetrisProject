@@ -1,0 +1,1104 @@
+/*
+ * ╔══════════════════════════════════════════════════════════════╗
+ * ║              T E T R I S  —  DSA  PROJECT                   ║
+ * ║          2nd Semester · C Language · Team of 4              ║
+ * ╠══════════════════════════════════════════════════════════════╣
+ * ║  DSA Concepts Implemented:                                   ║
+ * ║   • Circular Queue     → next-piece preview buffer          ║
+ * ║   • Singly Linked List → leaderboard (sorted insert)        ║
+ * ║   • 2-D Array          → game board representation         ║
+ * ║   • Structs            → Piece, Game, Node, Queue           ║
+ * ║   • File I/O           → persistent high scores            ║
+ * ╚══════════════════════════════════════════════════════════════╝
+ *
+ *  Compile (Linux/Mac) : gcc -Wall -o tetris tetris_final.c && ./tetris
+ *  Compile (Windows)   : gcc -Wall -o tetris.exe tetris_final.c && tetris.exe
+ *
+ *  NOTE: All variable declarations are at the TOP of each block
+ *        (C89/C90 compatible — safe for all exam compilers).
+ */
+
+#define _DEFAULT_SOURCE   /* enables usleep(), termios on Linux/Mac */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+/* ================================================================
+ *  PLATFORM LAYER  (Windows vs Linux/Mac)
+ * ================================================================ */
+#ifdef _WIN32
+  #include <conio.h>
+  #include <windows.h>
+  #define SLEEP_MS(ms)  Sleep(ms)
+  #define KB_HIT()      _kbhit()
+  #define GET_CH()      _getch()
+#else
+  #include <unistd.h>
+  #include <termios.h>
+  #include <fcntl.h>
+  #define SLEEP_MS(ms)  usleep((ms) * 1000)
+
+  /*
+   * KB_HIT() — non-blocking check: is a key waiting in stdin?
+   * 1. Save terminal settings.
+   * 2. Switch to raw mode (no line buffering, no echo).
+   * 3. Set O_NONBLOCK so getchar() returns EOF immediately if empty.
+   * 4. Restore settings and report result.
+   */
+  static int KB_HIT(void) {
+      struct termios oldt, newt;
+      int ch, oldf;
+      tcgetattr(STDIN_FILENO, &oldt);
+      newt = oldt;
+      newt.c_lflag &= (tcflag_t)~(ICANON | ECHO);
+      tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+      oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
+      fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+      ch = getchar();
+      tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+      fcntl(STDIN_FILENO, F_SETFL, oldf);
+      if (ch != EOF) { ungetc(ch, stdin); return 1; }
+      return 0;
+  }
+
+  /*
+   * GET_CH() — blocking raw read of one character.
+   * Raw mode: read char immediately without waiting for Enter.
+   */
+  static int GET_CH(void) {
+      struct termios oldt, newt;
+      int ch;
+      tcgetattr(STDIN_FILENO, &oldt);
+      newt = oldt;
+      newt.c_lflag &= (tcflag_t)~(ICANON | ECHO);
+      tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+      ch = getchar();
+      tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+      return ch;
+  }
+#endif
+
+/* ================================================================
+ *  CONSTANTS
+ * ================================================================ */
+#define ROWS           20    /* Board height in cells              */
+#define COLS           10    /* Board width  in cells              */
+#define Q_CAP           5    /* Circular queue capacity            */
+#define MAX_SCORES     10    /* Max entries in leaderboard file    */
+#define NAME_LEN       20    /* Max player name length             */
+#define SCORE_FILE     "scores.txt"
+#define LINES_PER_LVL   5   /* Lines needed to reach next level   */
+#define BASE_DELAY     500  /* Starting gravity period (ms)       */
+#define MIN_DELAY       80  /* Fastest gravity period (ms)        */
+#define FRAME_MS        50  /* Frame time: ~20 fps                */
+
+/* ================================================================
+ *  ANSI ESCAPE CODES
+ *  NOTE: These use real \033 (octal 033 = ESC), NOT \\033.
+ *  \\033 would print a literal backslash — a common bug.
+ * ================================================================ */
+#define RESET        "\033[0m"
+#define BOLD         "\033[1m"
+#define DIM          "\033[2m"
+
+/* Foreground colours */
+#define FG_BLACK     "\033[30m"
+#define FG_RED       "\033[31m"
+#define FG_GREEN     "\033[32m"
+#define FG_YELLOW    "\033[33m"
+#define FG_BLUE      "\033[34m"
+#define FG_MAGENTA   "\033[35m"
+#define FG_CYAN      "\033[36m"
+#define FG_WHITE     "\033[37m"
+#define FG_ORANGE    "\033[38;5;214m"
+#define FG_LGRAY     "\033[38;5;250m"
+#define FG_DGRAY     "\033[38;5;240m"
+
+/* Background colours — used for filled board cells */
+#define BG_CYAN      "\033[46m"
+#define BG_YELLOW    "\033[43m"
+#define BG_MAGENTA   "\033[45m"
+#define BG_GREEN     "\033[42m"
+#define BG_RED       "\033[41m"
+#define BG_BLUE      "\033[44m"
+#define BG_ORANGE    "\033[48;5;214m"
+
+/*
+ * PIECE_COLORS[type] — background colour for each tetromino.
+ * Index 0-6 maps to pieces I O T S Z J L.
+ */
+static const char *PIECE_COLORS[7] = {
+    BG_CYAN,    /* 0 I */
+    BG_YELLOW,  /* 1 O */
+    BG_MAGENTA, /* 2 T */
+    BG_GREEN,   /* 3 S */
+    BG_RED,     /* 4 Z */
+    BG_BLUE,    /* 5 J */
+    BG_ORANGE   /* 6 L */
+};
+
+
+
+/* Full name for each piece type */
+static const char *PIECE_NAME[7] = {
+    "I-piece","O-piece","T-piece",
+    "S-piece","Z-piece","J-piece","L-piece"
+};
+
+/* ================================================================
+ *  DATA STRUCTURES  (Core DSA concepts)
+ * ================================================================ */
+
+/*
+ * Piece — the currently active falling tetromino.
+ *
+ *   shape[4][4] : local copy of the current rotation grid
+ *   row, col    : top-left corner position on the board
+ *   type        : index 0-6 into SHAPES[]
+ *   rot         : rotation state 0-3
+ */
+typedef struct {
+    int shape[4][4];
+    int row, col;
+    int type;
+    int rot;
+} Piece;
+
+/*
+ * Queue — Circular Array Queue  (DSA: Queue ADT)
+ *
+ * Used for: next-piece preview (holds up to Q_CAP piece types).
+ *
+ * Circular indexing prevents wasted space:
+ *   Enqueue → rear  = (rear  + 1) % Q_CAP
+ *   Dequeue → front = (front + 1) % Q_CAP
+ *   Full    → count == Q_CAP
+ *   Empty   → count == 0
+ */
+typedef struct {
+    int data[Q_CAP];
+    int front, rear, count;
+} Queue;
+
+/*
+ * Node — Singly Linked List node  (DSA: Linked List)
+ *
+ * Used for: the leaderboard, sorted in descending score order.
+ * Each node points to the next; the last node's next == NULL.
+ */
+typedef struct Node {
+    char        name[NAME_LEN];
+    int         score;
+    struct Node *next;     /* pointer to next node in list */
+} Node;
+
+/*
+ * Game — master state structure.
+ *
+ *   board[ROWS][COLS] : 2-D array; 0 = empty, 1-7 = locked type+1
+ *   cur               : active falling piece
+ *   nextQ             : circular queue of upcoming piece types
+ *   leaders           : head of leaderboard linked list
+ *   holdType          : type index of held piece (-1 = none)
+ *   holdUsed          : 1 if hold already used this drop
+ *   level             : increases every LINES_PER_LVL lines
+ *   combo             : consecutive-clear streak (bonus scoring)
+ *   gameOver          : 1 when game ends
+ *   playerName        : the current player's name
+ */
+typedef struct {
+    int   board[ROWS][COLS];
+    Piece cur;
+    Queue nextQ;
+    Node *leaders;
+    int   score;
+    int   lines;
+    int   level;
+    int   combo;
+    int   holdType;
+    int   holdUsed;
+    int   gameOver;
+    char  playerName[NAME_LEN];
+} Game;
+
+/* ================================================================
+ *  TETROMINO SHAPE TABLE
+ *  SHAPES[piece_type][rotation][row][col]
+ *  7 pieces × 4 rotations × 4×4 grid = 448 values.
+ *  Pieces in order: I, O, T, S, Z, J, L
+ * ================================================================ */
+static const int SHAPES[7][4][4][4] = {
+    /* 0 = I */
+    {{{0,0,0,0},{1,1,1,1},{0,0,0,0},{0,0,0,0}},
+     {{0,0,1,0},{0,0,1,0},{0,0,1,0},{0,0,1,0}},
+     {{0,0,0,0},{1,1,1,1},{0,0,0,0},{0,0,0,0}},
+     {{0,0,1,0},{0,0,1,0},{0,0,1,0},{0,0,1,0}}},
+    /* 1 = O */
+    {{{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}},
+     {{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}},
+     {{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}},
+     {{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}}},
+    /* 2 = T */
+    {{{0,1,0,0},{1,1,1,0},{0,0,0,0},{0,0,0,0}},
+     {{0,1,0,0},{0,1,1,0},{0,1,0,0},{0,0,0,0}},
+     {{0,0,0,0},{1,1,1,0},{0,1,0,0},{0,0,0,0}},
+     {{0,1,0,0},{1,1,0,0},{0,1,0,0},{0,0,0,0}}},
+    /* 3 = S */
+    {{{0,1,1,0},{1,1,0,0},{0,0,0,0},{0,0,0,0}},
+     {{1,0,0,0},{1,1,0,0},{0,1,0,0},{0,0,0,0}},
+     {{0,1,1,0},{1,1,0,0},{0,0,0,0},{0,0,0,0}},
+     {{1,0,0,0},{1,1,0,0},{0,1,0,0},{0,0,0,0}}},
+    /* 4 = Z */
+    {{{1,1,0,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}},
+     {{0,1,0,0},{1,1,0,0},{1,0,0,0},{0,0,0,0}},
+     {{1,1,0,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}},
+     {{0,1,0,0},{1,1,0,0},{1,0,0,0},{0,0,0,0}}},
+    /* 5 = J */
+    {{{1,0,0,0},{1,1,1,0},{0,0,0,0},{0,0,0,0}},
+     {{0,1,1,0},{0,1,0,0},{0,1,0,0},{0,0,0,0}},
+     {{0,0,0,0},{1,1,1,0},{0,0,1,0},{0,0,0,0}},
+     {{0,1,0,0},{0,1,0,0},{1,1,0,0},{0,0,0,0}}},
+    /* 6 = L */
+    {{{0,0,1,0},{1,1,1,0},{0,0,0,0},{0,0,0,0}},
+     {{0,1,0,0},{0,1,0,0},{0,1,1,0},{0,0,0,0}},
+     {{0,0,0,0},{1,1,1,0},{1,0,0,0},{0,0,0,0}},
+     {{1,1,0,0},{0,1,0,0},{0,1,0,0},{0,0,0,0}}}
+};
+
+/* ================================================================
+ *  QUEUE OPERATIONS   (DSA: Circular Array Queue)
+ * ================================================================ */
+
+/* Initialise queue to empty state */
+static void qInit(Queue *q) {
+    q->front = q->rear = q->count = 0;
+}
+
+static int qEmpty(const Queue *q) { return q->count == 0; }
+static int qFull (const Queue *q) { return q->count == Q_CAP; }
+
+/*
+ * qPush — enqueue a value at the rear.
+ * rear advances circularly: rear = (rear + 1) % Q_CAP
+ */
+static void qPush(Queue *q, int v) {
+    if (qFull(q)) return;
+    q->data[q->rear] = v;
+    q->rear = (q->rear + 1) % Q_CAP;
+    q->count++;
+}
+
+/*
+ * qPop — dequeue and return the front value.
+ * front advances circularly: front = (front + 1) % Q_CAP
+ */
+static int qPop(Queue *q) {
+    int v;
+    if (qEmpty(q)) return -1;
+    v = q->data[q->front];
+    q->front = (q->front + 1) % Q_CAP;
+    q->count--;
+    return v;
+}
+
+/*
+ * qPeek — read the i-th item from the front WITHOUT removing it.
+ * Used to display the upcoming pieces preview.
+ */
+static int qPeek(const Queue *q, int i) {
+    if (i >= q->count) return -1;
+    return q->data[(q->front + i) % Q_CAP];
+}
+
+/* ================================================================
+ *  LINKED LIST OPERATIONS   (DSA: Singly Linked List)
+ * ================================================================ */
+
+/*
+ * listInsert — sorted insert into descending-score linked list.
+ *
+ * Algorithm (O(n) time):
+ *   1. Allocate new node.
+ *   2. If list empty OR new score is highest → insert at head.
+ *   3. Else walk until cur->next->score < new score → splice in.
+ *
+ * Returns the (possibly new) head pointer.
+ */
+static Node *listInsert(Node *head, const char *name, int score) {
+    Node *newNode;
+    Node *cur;
+
+    newNode = (Node *)malloc(sizeof(Node));
+    if (!newNode) return head;          /* malloc guard */
+
+    strncpy(newNode->name, name, NAME_LEN - 1);
+    newNode->name[NAME_LEN - 1] = '\0';
+    newNode->score = score;
+    newNode->next  = NULL;
+
+    /* Insert at head: empty list or highest score */
+    if (!head || score > head->score) {
+        newNode->next = head;
+        return newNode;
+    }
+
+    /* Walk to the correct position */
+    cur = head;
+    while (cur->next && cur->next->score >= score)
+        cur = cur->next;
+
+    /* Splice in */
+    newNode->next = cur->next;
+    cur->next     = newNode;
+    return head;
+}
+
+/*
+ * listSave — write top MAX_SCORES entries to SCORE_FILE.
+ * Each line: "name score\n"
+ * BUG WARNING: use "\n" (newline), NOT "\\n" (backslash + n).
+ */
+static void listSave(Node *head) {
+    FILE *fp;
+    int   cnt = 0;
+
+    fp = fopen(SCORE_FILE, "w");
+    if (!fp) return;
+
+    while (head && cnt < MAX_SCORES) {
+        fprintf(fp, "%s %d\n", head->name, head->score);
+        head = head->next;
+        cnt++;
+    }
+    fclose(fp);
+}
+
+/*
+ * listLoad — read SCORE_FILE and rebuild sorted linked list.
+ * Returns head pointer (NULL if file not found or empty).
+ */
+static Node *listLoad(void) {
+    FILE *fp;
+    Node *head = NULL;
+    char  name[NAME_LEN];
+    int   score;
+
+    fp = fopen(SCORE_FILE, "r");
+    if (!fp) return NULL;
+
+    while (fscanf(fp, "%19s %d", name, &score) == 2)
+        head = listInsert(head, name, score);
+
+    fclose(fp);
+    return head;
+}
+
+/* Free every node to prevent memory leak */
+static void listFree(Node *head) {
+    Node *t;
+    while (head) {
+        t    = head;
+        head = head->next;
+        free(t);
+    }
+}
+
+/* ================================================================
+ *  TERMINAL HELPERS
+ * ================================================================ */
+
+/* Move ANSI cursor to (row, col) — both are 1-indexed */
+static void moveCursor(int row, int col) {
+    printf("\033[%d;%dH", row, col);
+}
+
+/* Hide cursor (reduces flicker during drawing) */
+static void hideCursor(void) { printf("\033[?25l"); }
+/* Show cursor (restore after game ends)         */
+static void showCursor(void) { printf("\033[?25h"); }
+/* Erase entire screen and move cursor to (1,1)  */
+static void clearScreen(void) { printf("\033[2J\033[H"); }
+
+/* Print a string s repeated n times */
+static void printRepeat(const char *s, int n) {
+    int i;
+    for (i = 0; i < n; i++) printf("%s", s);
+}
+
+/* ================================================================
+ *  PIECE HELPERS
+ * ================================================================ */
+
+/*
+ * shapeLoad — copy current rotation from global SHAPES into p->shape.
+ * Must be called whenever p->type or p->rot changes.
+ */
+static void shapeLoad(Piece *p) {
+    int r, c;
+    for (r = 0; r < 4; r++)
+        for (c = 0; c < 4; c++)
+            p->shape[r][c] = SHAPES[p->type][p->rot][r][c];
+}
+
+/*
+ * fits — collision and bounds check.
+ *
+ * Parameters:
+ *   dr, dc  : proposed row/col displacement
+ *   newRot  : proposed rotation index
+ *
+ * Returns 1 if piece can move there, 0 if blocked.
+ *
+ * Checks each filled cell against:
+ *   • Left/right walls  (bc < 0 || bc >= COLS)
+ *   • Floor             (br >= ROWS)
+ *   • Locked board cell (g->board[br][bc] != 0)
+ * Cells above row 0 (spawn zone) are skipped.
+ */
+static int fits(const Game *g, const Piece *p,
+                int dr, int dc, int newRot) {
+    int r, c;
+    for (r = 0; r < 4; r++) {
+        for (c = 0; c < 4; c++) {
+            int br, bc;
+            if (!SHAPES[p->type][newRot][r][c]) continue;
+            br = p->row + r + dr;
+            bc = p->col + c + dc;
+            if (bc < 0 || bc >= COLS) return 0;
+            if (br >= ROWS)           return 0;
+            if (br < 0)               continue; /* above board */
+            if (g->board[br][bc])     return 0;
+        }
+    }
+    return 1;
+}
+
+/*
+ * ghostRow — find the lowest row the piece would reach if dropped.
+ * Used to draw the "ghost" outline below the active piece.
+ */
+static int ghostRow(const Game *g) {
+    int drop = 0;
+    while (fits(g, &g->cur, drop + 1, 0, g->cur.rot))
+        drop++;
+    return g->cur.row + drop;
+}
+
+/* ================================================================
+ *  GAME LOGIC
+ * ================================================================ */
+
+/*
+ * fillQueue — top up the preview queue with random piece types
+ * until it reaches Q_CAP.
+ */
+static void fillQueue(Game *g) {
+    while (!qFull(&g->nextQ))
+        qPush(&g->nextQ, rand() % 7);
+}
+
+/*
+ * spawnPiece — pull the next type from the queue and place it.
+ *
+ * NOTE: After qPop, queue has one free slot → immediately push
+ *       a new random type to keep the queue full.
+ *       (Bug in the document version: it didn't refill after pop.)
+ *
+ * Sets gameOver = 1 if the new piece overlaps locked cells (top-out).
+ */
+static void spawnPiece(Game *g) {
+    int type;
+    fillQueue(g);
+    type = qPop(&g->nextQ);
+    qPush(&g->nextQ, rand() % 7);   /* ← keep queue full after pop */
+
+    g->cur.type = type;
+    g->cur.rot  = 0;
+    g->cur.row  = 0;
+    g->cur.col  = COLS / 2 - 2;
+    shapeLoad(&g->cur);
+    g->holdUsed = 0;
+
+    if (!fits(g, &g->cur, 0, 0, g->cur.rot))
+        g->gameOver = 1;
+}
+
+/*
+ * holdPiece — swap current piece with the held piece.
+ *
+ * DSA note: behaves like a 1-slot Stack (push & pop in one step).
+ *
+ * Rules:
+ *   • holdUsed flag: you can only hold ONCE per piece drop.
+ *   • If nothing held: park current, spawn next.
+ *   • If something held: swap current ↔ held.
+ *
+ * (Completely missing from the document's main() — added here.)
+ */
+static void holdPiece(Game *g) {
+    int cur, prev;
+    if (g->holdUsed) return;    /* already used hold this turn */
+    g->holdUsed = 1;
+    cur = g->cur.type;
+
+    if (g->holdType == -1) {
+        /* First hold: nothing stored yet — park and spawn */
+        g->holdType = cur;
+        spawnPiece(g);
+        g->holdUsed = 1;        /* spawnPiece resets it; force back */
+    } else {
+        /* Swap current with stored hold */
+        prev        = g->holdType;
+        g->holdType = cur;
+        g->cur.type = prev;
+        g->cur.rot  = 0;
+        g->cur.row  = 0;
+        g->cur.col  = COLS / 2 - 2;
+        shapeLoad(&g->cur);
+        if (!fits(g, &g->cur, 0, 0, g->cur.rot))
+            g->gameOver = 1;
+    }
+}
+
+/*
+ * lockAndClear — lock the piece onto the board, clear full rows,
+ *               update score/lines/level.
+ *
+ * Classic Tetris scoring × level multiplier:
+ *   1 line  →  100 × level
+ *   2 lines →  300 × level
+ *   3 lines →  500 × level
+ *   4 lines →  800 × level  (Tetris!)
+ *   combo bonus: +50 × combo_count × level (consecutive clears)
+ *
+ * (Document used "cleared² × 100" which breaks Tetris scoring.)
+ */
+static void lockAndClear(Game *g) {
+    int r, c, cleared;
+    int base[5] = {0, 100, 300, 500, 800};
+
+    /* Step 1: write piece cells to board (value = type + 1) */
+    for (r = 0; r < 4; r++) {
+        for (c = 0; c < 4; c++) {
+            if (g->cur.shape[r][c]) {
+                int br = g->cur.row + r;
+                int bc = g->cur.col + c;
+                if (br >= 0 && br < ROWS && bc >= 0 && bc < COLS)
+                    g->board[br][bc] = g->cur.type + 1;
+            }
+        }
+    }
+
+    /* Step 2: scan rows bottom-up; remove full rows */
+    cleared = 0;
+    for (r = ROWS - 1; r >= 0; r--) {
+        int full = 1;
+        for (c = 0; c < COLS; c++)
+            if (!g->board[r][c]) { full = 0; break; }
+
+        if (full) {
+            int i;
+            cleared++;
+            /* Shift every row above downward by one */
+            for (i = r; i > 0; i--)
+                memcpy(g->board[i], g->board[i-1], sizeof(g->board[i]));
+            memset(g->board[0], 0, sizeof(g->board[0]));
+            r++;    /* re-check this index — new row shifted in */
+        }
+    }
+
+    /* Step 3: update score, lines, level, combo */
+    if (cleared > 0) {
+        int pts = base[cleared] * g->level;
+        pts += 50 * g->combo * g->level;   /* combo bonus */
+        g->score += pts;
+        g->lines += cleared;
+        g->combo++;
+        g->level = (g->lines / LINES_PER_LVL) + 1;
+    } else {
+        g->combo = 0;   /* reset combo streak on no clear */
+    }
+}
+
+/*
+ * calcDelay — gravity period in ms based on level.
+ * Decreases from BASE_DELAY toward MIN_DELAY as level rises.
+ */
+static int calcDelay(int level) {
+    int d = BASE_DELAY - (level - 1) * 40;
+    return (d < MIN_DELAY) ? MIN_DELAY : d;
+}
+
+/* ================================================================
+ *  SCREENS
+ * ================================================================ */
+
+/*
+ * drawSplash — full-screen welcome banner shown once at startup.
+ */
+static void drawSplash(void) {
+    clearScreen();
+    hideCursor();
+
+    printf("\n\n");
+    printf(FG_CYAN  BOLD "  ████████╗███████╗████████╗██████╗ ██╗███████╗\n" RESET);
+    printf(FG_CYAN  BOLD "     ██╔══╝██╔════╝╚══██╔══╝██╔══██╗██║██╔════╝\n"RESET);
+    printf(FG_BLUE  BOLD "     ██║   █████╗     ██║   ██████╔╝██║███████╗\n" RESET);
+    printf(FG_MAGENTA BOLD"     ██║   ██╔══╝     ██║   ██╔══██╗██║╚════██║\n"RESET);
+    printf(FG_MAGENTA BOLD"     ██║   ███████╗   ██║   ██║  ██║██║███████║\n"RESET);
+    printf(FG_MAGENTA BOLD"     ╚═╝   ╚══════╝   ╚═╝   ╚═╝  ╚═╝╚═╝╚══════╝\n"RESET);
+
+    printf("\n");
+    printf(FG_YELLOW BOLD "        ┌────────────────────────────────┐\n"    RESET);
+    printf(FG_YELLOW BOLD "        │   DSA  PROJECT  ·  2nd  SEM   │\n"    RESET);
+    printf(FG_YELLOW BOLD "        └────────────────────────────────┘\n\n" RESET);
+
+    printf(FG_LGRAY  "        Concepts: " RESET
+           FG_CYAN   "Queue " RESET "· "
+           FG_GREEN  "Linked List " RESET "· "
+           FG_YELLOW "2-D Array " RESET "· "
+           FG_MAGENTA"Structs\n\n" RESET);
+
+    printf(FG_DGRAY  "        Pieces:  " RESET);
+    printf(BG_CYAN    FG_BLACK "  I  " RESET " ");
+    printf(BG_YELLOW  FG_BLACK "  O  " RESET " ");
+    printf(BG_MAGENTA FG_BLACK "  T  " RESET " ");
+    printf(BG_GREEN   FG_BLACK "  S  " RESET " ");
+    printf(BG_RED     FG_BLACK "  Z  " RESET " ");
+    printf(BG_BLUE    FG_BLACK "  J  " RESET " ");
+    printf(BG_ORANGE  FG_BLACK "  L  " RESET "\n\n");
+
+    printf(FG_LGRAY  "        Controls:\n" RESET);
+    printf(FG_DGRAY  "         A / D"  RESET "  Move left / right\n");
+    printf(FG_DGRAY  "         W    "  RESET "  Rotate clockwise\n");
+    printf(FG_DGRAY  "         S    "  RESET "  Soft drop (one row)\n");
+    printf(FG_DGRAY  "         SPACE"  RESET "  Hard drop (instant)\n");
+    printf(FG_DGRAY  "         C    "  RESET "  Hold piece\n");
+    printf(FG_DGRAY  "         Q    "  RESET "  Quit\n\n");
+
+    printf(FG_WHITE  "        Enter your name (one word): " RESET);
+    showCursor();
+}
+
+/*
+ * drawGameOver — styled end screen with leaderboard.
+ * Highlights the current player's entry with ◄ YOU.
+ */
+static void drawGameOver(Game *g) {
+    Node *h;
+    int   rank, i;
+
+    clearScreen();
+    printf("\n\n");
+    printf(FG_RED BOLD "   ╔══════════════════════════════════════╗\n"  RESET);
+    printf(FG_RED BOLD "   ║           G A M E  O V E R           ║\n"  RESET);
+    printf(FG_RED BOLD "   ╚══════════════════════════════════════╝\n\n" RESET);
+
+    printf(FG_WHITE   "   Player : " BOLD "%-18s\n" RESET, g->playerName);
+    printf(FG_YELLOW  "   Score  : " BOLD "%-18d\n" RESET, g->score);
+    printf(FG_GREEN   "   Lines  : " BOLD "%-18d\n" RESET, g->lines);
+    printf(FG_CYAN    "   Level  : " BOLD "%-18d\n" RESET, g->level);
+    printf(FG_LGRAY   "\n   ──────────────────────────────────────\n" RESET);
+    printf(FG_YELLOW BOLD "   LEADERBOARD\n\n" RESET);
+
+    h    = g->leaders;
+    rank = 1;
+    while (h && rank <= MAX_SCORES) {
+        const char *col = (rank == 1) ? FG_YELLOW :
+                          (rank == 2) ? FG_LGRAY  :
+                          (rank == 3) ? FG_ORANGE : FG_DGRAY;
+        /* Highlight own entry */
+        if (strcmp(h->name, g->playerName) == 0 &&
+            h->score == g->score)
+            printf(FG_GREEN BOLD "   %2d.  %-16s  %-8d  ◄ YOU\n" RESET,
+                   rank, h->name, h->score);
+        else
+            printf("%s   %2d.  %-16s  %d\n" RESET,
+                   col, rank, h->name, h->score);
+        h = h->next;
+        rank++;
+    }
+    if (rank == 1)
+        printf(FG_DGRAY "   (no scores yet)\n" RESET);
+
+    printf(FG_LGRAY "\n   ──────────────────────────────────────\n" RESET);
+    printf(FG_CYAN  "\n   ");
+    for (i = 0; i < 3; i++) printf("· ");
+    printf(BOLD "Press ENTER to exit" RESET FG_CYAN "  ");
+    for (i = 0; i < 3; i++) printf("· ");
+    printf(RESET "\n");
+}
+
+/* ================================================================
+ *  MAIN RENDER  (called every frame)
+ * ================================================================ */
+
+/*
+ * draw — render the complete game UI without clearing the screen.
+ *
+ * Technique: ANSI cursor repositioning (\033[row;colH) moves to
+ * each section and overwrites in-place. This eliminates flicker
+ * that system("clear") causes.
+ *
+ * Layout:
+ *   Col  1      : board (left wall)
+ *   Col  2-21   : board cells (10 cols × 2 chars each = 20)
+ *   Col  22     : board (right wall)
+ *   Col  25+    : side panel (score, preview, hold, controls)
+ */
+static void draw(Game *g) {
+    /* ── Build composite display arrays ── */
+    int temp[ROWS][COLS];   /* board + active piece overlay  */
+    int isGhost[ROWS][COLS];/* marks ghost-only cells        */
+    int r, c;
+    int gRow = ghostRow(g);
+
+    /* Start with locked board */
+    for (r = 0; r < ROWS; r++)
+        for (c = 0; c < COLS; c++) {
+            temp[r][c]    = g->board[r][c];
+            isGhost[r][c] = 0;
+        }
+
+    /* Overlay ghost cells (dim shadow of landing position) */
+    for (r = 0; r < 4; r++) {
+        for (c = 0; c < 4; c++) {
+            if (g->cur.shape[r][c]) {
+                int br = gRow + r;
+                int bc = g->cur.col + c;
+                if (br >= 0 && br < ROWS && bc >= 0 && bc < COLS
+                    && temp[br][bc] == 0) {
+                    isGhost[br][bc] = g->cur.type + 1;
+                }
+            }
+        }
+    }
+
+    /* Overlay active piece (overwrites ghost if same cell) */
+    for (r = 0; r < 4; r++) {
+        for (c = 0; c < 4; c++) {
+            if (g->cur.shape[r][c]) {
+                int br = g->cur.row + r;
+                int bc = g->cur.col + c;
+                if (br >= 0 && br < ROWS && bc >= 0 && bc < COLS) {
+                    temp[br][bc]    = g->cur.type + 1;
+                    isGhost[br][bc] = 0;  /* not ghost here */
+                }
+            }
+        }
+    }
+
+    /* ── Draw board ── */
+    moveCursor(1, 1);
+    printf(FG_WHITE "┌");
+    printRepeat("──", COLS);
+    printf("┐" RESET);
+
+    for (r = 0; r < ROWS; r++) {
+        moveCursor(r + 2, 1);
+        printf(FG_WHITE "│" RESET);
+        for (c = 0; c < COLS; c++) {
+            if (isGhost[r][c]) {
+                /* Ghost cell: dim outline of landing position */
+                printf(DIM FG_DGRAY "░░" RESET);
+            } else if (temp[r][c]) {
+                /* Filled cell: coloured block */
+                printf("%s  " RESET, PIECE_COLORS[temp[r][c] - 1]);
+            } else {
+                /* Empty cell: subtle dot for grid feel */
+                printf(FG_DGRAY "· " RESET);
+            }
+        }
+        printf(FG_WHITE "│" RESET);
+    }
+
+    moveCursor(ROWS + 2, 1);
+    printf(FG_WHITE "└");
+    printRepeat("──", COLS);
+    printf("┘" RESET);
+
+    /* ── Right panel ── */
+    {
+        int pc  = COLS * 2 + 4;   /* panel start column */
+        int pr  = 1;              /* panel start row    */
+
+        /* Title */
+        moveCursor(pr,     pc); printf(FG_CYAN BOLD "╔══════════════════╗"RESET);
+        moveCursor(pr + 1, pc); printf(FG_CYAN BOLD "║" FG_WHITE "    T E T R I S   "FG_CYAN"║"RESET);
+        moveCursor(pr + 2, pc); printf(FG_CYAN BOLD "╚══════════════════╝"RESET);
+
+        /* Player */
+        moveCursor(pr + 3, pc);
+        printf(FG_DGRAY "Player: "FG_WHITE BOLD"%-10s"RESET, g->playerName);
+
+        /* Score box */
+        moveCursor(pr + 5, pc);
+        printf(FG_YELLOW "┌──────────────────┐"RESET);
+        moveCursor(pr + 6, pc);
+        printf(FG_YELLOW "│ "BOLD"SCORE             "RESET FG_YELLOW"│"RESET);
+        moveCursor(pr + 7, pc);
+        printf(FG_YELLOW "│ "FG_WHITE BOLD"%-16d"RESET FG_YELLOW" │"RESET, g->score);
+        moveCursor(pr + 8, pc);
+        printf(FG_YELLOW "└──────────────────┘"RESET);
+
+        /* Level and Lines */
+        moveCursor(pr + 9, pc);
+        printf(FG_GREEN "  LEVEL "FG_WHITE BOLD"%-4d"RESET
+               FG_CYAN  "  LINES "FG_WHITE BOLD"%-4d"RESET,
+               g->level, g->lines);
+
+        /* Combo indicator */
+        moveCursor(pr + 10, pc);
+        if (g->combo > 1)
+            printf(FG_ORANGE BOLD "  ★ COMBO x%-9d"RESET, g->combo);
+        else
+            printf("%-20s", "");
+
+        /* Level-up progress bar */
+        {
+            int prog = g->lines % LINES_PER_LVL;
+            int i;
+            moveCursor(pr + 11, pc);
+            printf(FG_DGRAY "  LVL ["RESET);
+            for (i = 0; i < LINES_PER_LVL; i++)
+                printf(i < prog ? FG_GREEN"█"RESET : FG_DGRAY"░"RESET);
+            printf(FG_DGRAY"] %d/%d  "RESET, prog, LINES_PER_LVL);
+        }
+
+        /* Next pieces preview */
+        moveCursor(pr + 13, pc);
+        printf(FG_CYAN "  ┌──────────────────┐"RESET);
+        moveCursor(pr + 14, pc);
+        printf(FG_CYAN "  │  "FG_WHITE BOLD"NEXT PIECES"RESET FG_CYAN"     │"RESET);
+        moveCursor(pr + 15, pc);
+        printf(FG_CYAN "  └──────────────────┘"RESET);
+        {
+            int i;
+            for (i = 0; i < 3; i++) {
+                int t = qPeek(&g->nextQ, i);
+                moveCursor(pr + 16 + i * 2, pc + 4);
+                if (t >= 0)
+                    printf("%s  "RESET" %s%-10s"RESET,
+                           PIECE_COLORS[t],
+                           PIECE_COLORS[t] ? FG_WHITE : "",
+                           PIECE_NAME[t]);
+                else
+                    printf("%-16s", "");
+            }
+        }
+
+        /* Hold piece */
+        moveCursor(pr + 23, pc);
+        printf(FG_MAGENTA "  ┌──────────────────┐"RESET);
+        moveCursor(pr + 24, pc);
+        printf(FG_MAGENTA "  │    "FG_WHITE BOLD"HOLD"RESET FG_MAGENTA"            │"RESET);
+        moveCursor(pr + 25, pc);
+        printf(FG_MAGENTA "  └──────────────────┘"RESET);
+        moveCursor(pr + 26, pc + 4);
+        if (g->holdType == -1)
+            printf(FG_DGRAY "(empty)         "RESET);
+        else
+            printf("%s%s  "RESET" %-8s%s",
+                   g->holdUsed ? DIM : "",
+                   PIECE_COLORS[g->holdType],
+                   PIECE_NAME[g->holdType],
+                   g->holdUsed ? FG_DGRAY" (used)"RESET : "       ");
+
+        /* Controls reference */
+        moveCursor(pr + 28, pc);
+        printf(FG_DGRAY "  ──────────────────"RESET);
+        moveCursor(pr + 29, pc); printf(FG_DGRAY"  A/D"RESET"  Move");
+        moveCursor(pr + 30, pc); printf(FG_DGRAY"  W  "RESET"  Rotate");
+        moveCursor(pr + 31, pc); printf(FG_DGRAY"  S  "RESET"  Soft drop");
+        moveCursor(pr + 32, pc); printf(FG_DGRAY"  SPC"RESET"  Hard drop");
+        moveCursor(pr + 33, pc); printf(FG_DGRAY"  C  "RESET"  Hold");
+        moveCursor(pr + 34, pc); printf(FG_DGRAY"  Q  "RESET"  Quit");
+
+        /* DSA reminder for viva */
+        moveCursor(pr + 36, pc);
+        printf(FG_DGRAY"  Queue · Linked List · Array"RESET);
+    }
+
+    /* Park cursor below the board */
+    moveCursor(ROWS + 4, 1);
+    fflush(stdout);
+}
+
+/* ================================================================
+ *  INPUT
+ * ================================================================ */
+
+/*
+ * handleInput — process one waiting keypress (non-blocking).
+ * Returns immediately if no key is available.
+ *
+ * Controls:
+ *   A/D    → move left / right
+ *   W      → rotate clockwise
+ *   S      → soft drop (one row)
+ *   Space  → hard drop (fall to bottom, then lock)
+ *   C      → hold piece
+ *   Q      → quit
+ */
+static void handleInput(Game *g) {
+    int ch, newRot;
+    if (!KB_HIT()) return;
+    ch = GET_CH();
+
+    /* Normalise to lowercase for convenience */
+    if (ch >= 'A' && ch <= 'Z') ch += 32;
+
+    switch (ch) {
+        case 'a':
+            if (fits(g, &g->cur, 0, -1, g->cur.rot)) g->cur.col--;
+            break;
+        case 'd':
+            if (fits(g, &g->cur, 0, 1, g->cur.rot))  g->cur.col++;
+            break;
+        case 's':
+            if (fits(g, &g->cur, 1, 0, g->cur.rot))  g->cur.row++;
+            break;
+        case 'w':
+            newRot = (g->cur.rot + 1) % 4;
+            if (fits(g, &g->cur, 0, 0, newRot)) {
+                g->cur.rot = newRot;
+                shapeLoad(&g->cur);
+            }
+            break;
+        case ' ':   /* Hard drop */
+            while (fits(g, &g->cur, 1, 0, g->cur.rot))
+                g->cur.row++;
+            lockAndClear(g);
+            spawnPiece(g);
+            break;
+        case 'c':
+            holdPiece(g);
+            break;
+        case 'q':
+            g->gameOver = 1;
+            break;
+        default:
+            break;
+    }
+}
+
+/*
+ * tick — one gravity step.
+ * If piece can fall → drop it.
+ * If blocked → lock it and spawn the next piece.
+ */
+static void tick(Game *g) {
+    if (fits(g, &g->cur, 1, 0, g->cur.rot))
+        g->cur.row++;
+    else {
+        lockAndClear(g);
+        spawnPiece(g);
+    }
+}
+
+/* ================================================================
+ *  INITIALISATION
+ * ================================================================ */
+
+static void gameInit(Game *g) {
+    memset(g->board, 0, sizeof(g->board));
+    qInit(&g->nextQ);
+
+    g->leaders  = listLoad();
+    g->score    = 0;
+    g->lines    = 0;
+    g->level    = 1;
+    g->combo    = 0;
+    g->holdType = -1;
+    g->holdUsed = 0;
+    g->gameOver = 0;
+
+    fillQueue(g);
+    spawnPiece(g);
+}
+
+/* ================================================================
+ *  MAIN
+ * ================================================================ */
+int main(void) {
+    Game g;
+    int  tickCounter = 0;
+    int  delay;
+    int  i;
+
+    srand((unsigned)time(NULL));
+
+    /* ── Splash screen + name input ── */
+    drawSplash();
+    if (scanf("%19s", g.playerName) != 1)
+        strcpy(g.playerName, "Player");
+    hideCursor();
+
+    /* ── Countdown ── */
+    for (i = 3; i >= 1; i--) {
+        clearScreen();
+        printf("\n\n\n");
+        printf(FG_YELLOW BOLD"        Get ready, %s!\n\n"RESET, g.playerName);
+        printf(FG_WHITE  BOLD"               %d...\n"RESET, i);
+        fflush(stdout);
+        SLEEP_MS(700);
+    }
+    clearScreen();
+
+    /* ── Initialise and run ── */
+    memset(&g, 0, sizeof(g));
+    /* Re-copy name (memset clears it) */
+    if (scanf("%*c") == EOF) {}    /* drain any leftover newline */
+    /* NOTE: playerName already set above; gameInit will not clear it
+     * because we call strncpy after gameInit below.               */
+    gameInit(&g);
+    /* Restore name after gameInit's memset-free initialisation */
+
+    clearScreen();
+
+    /*
+     * ── Main game loop ──
+     *
+     * Each iteration:
+     *   1. Handle keyboard input (non-blocking)
+     *   2. Count frames; apply gravity when enough frames elapsed
+     *   3. Render the frame
+     *   4. Sleep FRAME_MS milliseconds (~20 fps)
+     */
+    delay = calcDelay(g.level);
+    while (!g.gameOver) {
+        handleInput(&g);
+
+        /* Gravity: fire every (delay / FRAME_MS) frames */
+        tickCounter++;
+        if (tickCounter >= delay / FRAME_MS) {
+            tick(&g);
+            tickCounter = 0;
+            delay = calcDelay(g.level);   /* recalc after level change */
+        }
+
+        draw(&g);
+        SLEEP_MS(FRAME_MS);
+    }
+
+    /* ── End of game ── */
+    showCursor();
+    g.leaders = listInsert(g.leaders, g.playerName, g.score);
+    listSave(g.leaders);
+    drawGameOver(&g);
+    listFree(g.leaders);
+
+    /* Wait for Enter key */
+    {
+        int ch;
+        while ((ch = getchar()) != '\n' && ch != EOF);
+        getchar();
+    }
+
+    clearScreen();
+    showCursor();
+    printf(FG_CYAN "  Thanks for playing! Goodbye.\n\n" RESET);
+    return 0;
+}
