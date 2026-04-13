@@ -511,8 +511,9 @@ static void fillQueue(Game *g) {
 static void spawnPiece(Game *g) {
     int type;
     fillQueue(g);
-    type = qPop(&g->nextQ);
-    qPush(&g->nextQ, rand() % 7);   /* ← keep queue full after pop */
+int type = qPop(&g->nextQ);
+if (type == -1) type = rand() % 7;
+qPush(&g->nextQ, rand() % 7);
 
     g->cur.type = type;
     g->cur.rot  = 0;
@@ -1047,16 +1048,32 @@ int main(void) {
     }
     clearScreen();
 
-    /* ── Initialise and run ── */
-    memset(&g, 0, sizeof(g));
-    /* Re-copy name (memset clears it) */
-    if (scanf("%*c") == EOF) {}    /* drain any leftover newline */
-    /* NOTE: playerName already set above; gameInit will not clear it
-     * because we call strncpy after gameInit below.               */
-    gameInit(&g);
-    /* Restore name after gameInit's memset-free initialisation */
+Game g;
+int tickCounter = 0;
+int delay;
+int i;
 
+srand((unsigned)time(NULL));
+
+/* Splash + name */
+drawSplash();
+if (scanf("%19s", g.playerName) != 1)
+    strcpy(g.playerName, "Player");
+
+/* Countdown */
+for (i = 3; i >= 1; i--) {
     clearScreen();
+    printf("\n\n\n");
+    printf("Get ready, %s!\n\n", g.playerName);
+    printf("   %d...\n", i);
+    fflush(stdout);
+    SLEEP_MS(700);
+}
+
+/* INIT GAME PROPERLY */
+gameInit(&g);   // ✅ DO NOT memset again
+
+clearScreen();
 
     /*
      * ── Main game loop ──
